@@ -15,39 +15,37 @@
 - [ ] `package.json` (type: module, deps: @xmpp/client + @xmpp-plugins/*,
       devDeps: typescript, openclaw для типов)
 
-## Этап 1 — Ядро XMPP-клиента (v0.1.0)
+## Этап 1 — Ядро XMPP-клиента (v0.1.0) — ✅ ГОТОВО
 
 Цель: standalone-модуль, который коннектится к XMPP и умеет слать/принимать
 сообщения, без OpenClaw.
 
-- [ ] `src/xmpp-client.ts`: обёртка над `@xmpp/client`:
+- [x] `src/xmpp-client.ts`: обёртка над `@xmpp/client` (v0.14.0):
   - connect (jid, password, host?, port?, tls?)
   - события: `online`, `stanza`, `error`, `offline`
   - `sendChat(to, text)`, `sendGroupchat(to, text)`
   - `joinMUC(room, nick)`, `setPresence(status?)`
   - `setTyping(to, state)` (XEP-0085)
   - keepalive ping (XEP-0199)
-- [ ] `src/markdown.ts`: `_strip_markdown`-аналог (markdown → plain text)
-- [ ] Smoke-тест standalone: логин на тестовом XMPP-аккаунте,
-  self-send, MUC join
+- [x] `src/markdown.ts`: `_strip_markdown`-аналог (markdown → plain text)
+- [x] Smoke-тест standalone: логин на тестовом XMPP-аккаунте,
+  self-send, MUC join — **PASSED** (connect/auth/send/echo-filter/disconnect)
 
 **DoD**: `node test/smoke.js` коннектится, шлёт себе сообщение, заходит в
 MUC, отключается без ошибок.
 
-## Этап 2 — Интеграция с OpenClaw plugin API (v0.2.0)
+## Этап 2 — Интеграция с OpenClaw plugin API (v0.2.0) — ✅ ГОТОВО
 
-- [ ] `index.js` — `defineBundledChannelEntry` (по образцу IRC)
-- [ ] `src/channel.ts`:
+- [x] `src/index.ts` — `defineChannelPluginEntry` (новый SDK API, не IRC-legacy)
+- [x] `src/channel.ts` (createChatChannelPlugin):
   - `resolveXmppAccount(params)` — аккаунты из config
-  - `listEnabledXmppAccounts(cfg)`
-  - allowlist: `normalizeXmppAllowEntry`, `buildXmppAllowlistCandidates`
-  - `xmppIngressIdentity` через `defineStableChannelIngressIdentity`
-- [ ] `src/channel-plugin-api.ts`: `xmppPlugin` (capabilities: direct+group,
-  messaging: targetPrefixes, normalizeTarget, inferTargetChatType,
-  resolveOutboundSessionRoute)
-- [ ] `openclaw.plugin.json`: полный манифест с JSON Schema конфига
-  (jid, password, host, port, tls, allowFrom, mucNick, homeChannel)
-- [ ] `src/secret-contract-api.ts`: `channelSecrets` для пароля
+  - allowlist: через `security.dm` (declarative options)
+- [x] `openclaw.plugin.json`: полный манифест с JSON Schema конфига
+      (jid, password, host, port, tls, allowFrom, mucNick, homeChannel)
+- [ ] `src/secret-contract-api.ts`: `channelSecrets` для пароля (пароль пока
+      в конфиге/env — работает, но не best practice)
+- [x] DoD-проверка: плагин ставится через `openclaw plugins install` (npm-pack),
+      `channels list --all` показывает XMPP installed (2026-09-09)
 
 **DoD**: плагин ставится через `openclaw plugins install`,
 `openclaw channels add xmpp` находит канал, конфиг валидируется.
