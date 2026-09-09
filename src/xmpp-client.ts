@@ -109,6 +109,14 @@ export class XmppClient {
 
     this.xmpp.on("stanza", (stanza: Stanza) => {
       if (stanza.is("message")) {
+        console.log(
+          "[xmpp:debug] stanza:",
+          stanza.attrs.type,
+          "from:",
+          stanza.attrs.from,
+          "body:",
+          String(stanza.getChild?.("body")?.text?.() ?? "").slice(0, 60),
+        );
         this.emitMessage(stanza);
         return;
       }

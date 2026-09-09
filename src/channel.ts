@@ -114,6 +114,11 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
       await client.start();
       sharedClient = client;
 
+      // Ingress: подписка на события клиента
+      client.on("message", (msg: any) => {
+        void dispatchIncoming(msg, ctx, statusSink);
+      });
+
       // Готовность: statusSink + presence
       statusSink(channelReadyPatch());
       if (account.homeChannel) {
