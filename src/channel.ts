@@ -113,9 +113,7 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
 
       await client.start();
       sharedClient = client;
-      console.log("[xmpp:lifecycle] Client started. Attaching handler to:", client);
       client.onMessage((msg: any) => {
-        console.log("[xmpp:lifecycle] Inbound message caught by handler!");
         void dispatchIncoming(msg, ctx, statusSink);
       });
 
@@ -138,7 +136,6 @@ async function dispatchIncoming(
   ctx: any,
   statusSink: any,
 ): Promise<void> {
-  console.log("[xmpp:ingress] dispatchIncoming called for:", msg.from);
   try {
     statusSink?.({ lastInboundAt: Date.now() });
     const { dispatchInboundDirectDmWithRuntime } = await import(

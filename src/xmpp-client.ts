@@ -42,7 +42,7 @@ export class XmppClient {
   private cfg: XmppConfig;
   private online = false;
   private pingTimer: NodeJS.Timeout | null = null;
-  private handlers: Record<string, any> = {};
+  private static handlers: Record<string, any> = {};
   private pendingIq = new Map<string, (s: Stanza | null) => void>();
 
   constructor(cfg: XmppConfig) {
@@ -50,7 +50,7 @@ export class XmppClient {
   }
 
   on(event: XmppEvent, cb: any): void {
-    this.handlers[event] = cb;
+    XmppClient.handlers[event] = cb;
   }
 
   // ── JID helpers ──────────────────────────────────────────────
@@ -94,27 +94,22 @@ export class XmppClient {
       console.log(`[xmpp] online as ${String(address)}`);
       this.sendPresence("chat", "OpenClaw XMPP channel").catch(() => {});
       this.startPing();
-      this.handlers.online?.();
+      XmppClient.handlers.online?.();
     });
 
     this.xmpp.on("offline", () => {
       this.online = false;
       this.stopPing();
-      this.handlers.offline?.();
+      XmppClient.handlers.offline?.();
     });
 
     this.xmpp.on("error", (err: Error) => {
-      this.handlers.error?.(err);
+      XmppClient.handlers.error?.(err);
     });
 
     this.xmpp.on("stanza", (stanza: Stanza) => {
       if (stanza.is("message")) {
         console.log(
-          "[xmpp:debug] stanza:",
-          stanza.attrs.type,
-          "from:",
-          stanza.attrs.from,
-          "body:",
           String(stanza.getChild?.("body")?.text?.() ?? "").slice(0, 60),
         );
         this.emitMessage(stanza);
@@ -132,7 +127,7 @@ export class XmppClient {
   }
 
   onMessage(cb: (msg: any) => void) {
-    this.handlers.message = cb;
+    XmppClient.handlers.message = cb;
   }
   async stop(): Promise<void> {
     this.stopPing();
@@ -246,7 +241,7 @@ export class XmppClient {
     if (fromBare === XmppClient.bare(this.cfg.jid)) return;
     if (chatType === "groupchat" && fromResource === this.mucNick()) return;
 
-    this.handlers.message?.({
+    XmppClient.handlers.message?.({
       from: fromBare,
       fromResource,
       chatType,
