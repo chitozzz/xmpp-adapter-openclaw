@@ -2,7 +2,8 @@
  * channel.ts — ChannelPlugin для XMPP (OpenClaw).
  *
  * API: createChatChannelPlugin (openclaw/plugin-sdk/channel-core)
- * Docs: https://docs.openclaw.ai/plugins/sdk-channel-plugins
+ * Контракт запуска: base.gateway.startAccount(ctx) — вызывается gateway
+ * для каждого включённого аккаунта канала (см. ANALYSIS.md §2.4).
  */
 
 import {
@@ -10,6 +11,11 @@ import {
   createChatChannelPlugin,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/channel-core";
+import {
+  createAccountStatusSink,
+  runPassiveAccountLifecycle,
+} from "openclaw/plugin-sdk/channel-outbound";
+import { channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { XmppClient } from "./xmpp-client.js";
 import { stripMarkdown } from "./markdown.js";
 import { randomUUID } from "node:crypto";
@@ -56,11 +62,139 @@ export function resolveAccount(
   };
 }
 
+// ── Shared client runtime ─────────────────────────────────────
+
+let sharedClient: XmppClient | null = null;
+
+export function getSharedClient(): XmppClient {
+  if (!sharedClient) throw new Error("xmpp: client not started");
+  return sharedClient;
+}
+
+export async function stopXmppRuntime(): Promise<void> {
+  if (sharedClient) {
+    await sharedClient.stop();
+    sharedClient = null;
+  }
+}
+
+/** Старт аккаунта: подключение + ingress + statusSink для health-monitor. */
+async function startXmppGatewayAccount(ctx: any): Promise<void> {
+  const account: ResolvedAccount = ctx.account;
+  const statusSink = createAccountStatusSink({
+    accountId: ctx.accountId,
+    setStatus: ctx.setStatus,
+  });
+
+  if (!account.jid) {
+    throw new Error(`xmpp is not configured for account "${ctx.accountId}"`);
+  }
+  ctx.log?.info?.(
+    `[${ctx.accountId}] starting XMPP provider (${account.jid}${account.host ? ` @ ${account.host}:${account.port ?? 5222}` : ""})`,
+  );
+
+  await runPassiveAccountLifecycle({
+    abortSignal: ctx.abortSignal,
+    start: async () => {
+      const client = new XmppClient({
+        jid: account.jid,
+        password: account.password,
+        host: account.host,
+        port: account.port,
+        tls: account.tls,
+        mucNick: account.mucNick,
+        homeChannel: account.homeChannel,
+      });
+
+      // Ingress: входящие → dispatch в agent runtime
+      client.on("message", (msg: any) => {
+        void dispatchIncoming(msg, ctx, statusSink);
+      });
+
+      await client.start();
+      sharedClient = client;
+
+      // Готовность: statusSink + presence
+      statusSink(channelReadyPatch());
+      if (account.homeChannel) {
+        await client.joinMuc(account.homeChannel).catch(() => {});
+      }
+      return { stop: async () => { await client.stop(); sharedClient = null; } };
+    },
+    stop: async (monitor: any) => {
+      await monitor?.stop?.();
+    },
+  });
+}
+
+/** Входящее сообщение → agent turn (через dispatchInboundDirectDmWithRuntime). */
+async function dispatchIncoming(
+  msg: any,
+  ctx: any,
+  statusSink: any,
+): Promise<void> {
+  try {
+    statusSink?.({ lastInboundAt: Date.now() });
+    const { dispatchInboundDirectDmWithRuntime } = await import(
+      "openclaw/plugin-sdk/channel-inbound"
+    );
+    const isMuc = msg.chatType === "groupchat";
+    const account: ResolvedAccount = ctx.account;
+
+    // MUC: отвечаем только при упоминании ника бота
+    let text = msg.text;
+    if (isMuc) {
+      const nick = account.mucNick ?? account.jid.split("@")[0];
+      const mentioned = new RegExp(`@?${escapeRe(nick)}\\b`, "i").test(text);
+      if (!mentioned) return;
+      text = text.replace(new RegExp(`@?${escapeRe(nick)}[:,]?\\s*`, "i"), "");
+    }
+
+    await dispatchInboundDirectDmWithRuntime({
+      cfg: ctx.cfg,
+      channel: CHANNEL_ID,
+      channelLabel: "XMPP",
+      accountId: ctx.accountId ?? "default",
+      peer: { id: msg.from },
+      senderId: msg.from,
+      senderAddress: msg.from,
+      recipientAddress: account.jid,
+      conversationLabel: isMuc ? `${msg.from} (MUC)` : msg.from,
+      rawBody: text,
+      messageId: msg.stanzaId ?? `${Date.now()}-${randomUUID().slice(0, 8)}`,
+      provider: "xmpp",
+      deliver: async (payload: any) => {
+        const out = String(payload?.text ?? "");
+        if (!out) return;
+        const client = getSharedClient();
+        if (isMuc) {
+          await client.sendGroupchat(msg.from, stripMarkdown(out));
+        } else {
+          await client.sendChat(msg.from, stripMarkdown(out), msg.thread);
+        }
+        statusSink?.({ lastOutboundAt: Date.now() });
+      },
+      onRecordError: (err: unknown) =>
+        ctx.log?.error?.("[xmpp] record error:", err),
+      onDispatchError: (err: unknown, info: { kind?: string }) =>
+        ctx.log?.error?.("[xmpp] dispatch error:", info?.kind, err),
+      runtime: ctx.runtime,
+    } as any);
+  } catch (err) {
+    console.error("[xmpp] ingress failed:", err);
+  }
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// ── Plugin object ─────────────────────────────────────────────
+
 export const xmppPlugin = createChatChannelPlugin<ResolvedAccount>({
   base: createChannelPluginBase({
     id: CHANNEL_ID,
 
-    // Основные возможности канала
     capabilities: {
       chatTypes: ["direct", "group"],
       media: false,
@@ -92,6 +226,8 @@ export const xmppPlugin = createChatChannelPlugin<ResolvedAccount>({
         },
       }),
     },
+
+    // ... (setup) ...
   }) as any,
 
   // DM security: кто может писать боту (allowlist по bare JID)
@@ -109,13 +245,10 @@ export const xmppPlugin = createChatChannelPlugin<ResolvedAccount>({
     text: {
       idLabel: "XMPP JID",
       message: "Send this code to verify your identity:",
-      notify: async ({ id, meta, cfg }) => {
-        // id — JID контакта (см. ChannelPairingAdapter.notifyApproval)
+      notify: async ({ id, meta }: any) => {
         const target = id;
         const code = meta?.code ?? "";
-        const client = getSharedClient();
-        await client.sendChat(target, `Pairing code: ${code}`);
-        void cfg;
+        await getSharedClient().sendChat(target, `Pairing code: ${code}`);
       },
     },
   },
@@ -129,15 +262,15 @@ export const xmppPlugin = createChatChannelPlugin<ResolvedAccount>({
   outbound: {
     attachedResults: {
       channel: CHANNEL_ID,
-      sendText: async (ctx) => {
+      sendText: async (ctx: any) => {
         const client = getSharedClient();
         const to = ctx.to;
         const text = stripMarkdown(ctx.text);
-        const sendFn = XmppClient.isMuc(to)
-          ? (t: string) => client.sendGroupchat(to, t)
-          : (t: string) => client.sendChat(to, t, undefined);
-        // Чанкинг делает core через chunker (ниже) — тут уже кусок.
-        await sendFn(text);
+        if (XmppClient.isMuc(to)) {
+          await client.sendGroupchat(to, text);
+        } else {
+          await client.sendChat(to, text);
+        }
         return {
           messageId: randomUUID(),
           target: { kind: "conversation", id: to },
@@ -145,61 +278,19 @@ export const xmppPlugin = createChatChannelPlugin<ResolvedAccount>({
       },
     },
     base: {
-      // Чанкинг: limit задаёт core; режим — простой текст
-      chunker: (text: string, limit: number) => {
-        return chunkByLimit(text, limit);
-      },
-      chunkerMode: "text" as const,
-      textChunkLimit: 4000,
       deliveryMode: "direct" as const,
+      textChunkLimit: 4000,
     },
   },
 });
 
-/** Разбивка текста на куски ≤ limit по границам строк/слов. */
-function chunkByLimit(text: string, limit: number): string[] {
-  if (text.length <= limit) return [text];
-  const chunks: string[] = [];
-  let rest = text;
-  while (rest.length > limit) {
-    let cut = rest.lastIndexOf("\n", limit);
-    if (cut < limit * 0.5) cut = rest.lastIndexOf(" ", limit);
-    if (cut < limit * 0.5) cut = limit;
-    chunks.push(rest.slice(0, cut).trimEnd());
-    rest = rest.slice(cut).trimStart();
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
-}
 
-// ── Shared client runtime ─────────────────────────────────────
+// gateway-контракт: runtime вызывает startAccount(ctx) для аккаунтов канала.
+// Поле отсутствует в типах CreateChannelPluginBaseOptions, но runtime его
+// читает (см. IRC-плагин); добавляем пост-фактум.
+(xmppPlugin as any).gateway = {
+  startAccount: async (ctx: any) => {
+    await startXmppGatewayAccount(ctx);
+  },
+};
 
-let sharedClient: XmppClient | null = null;
-
-export function getSharedClient(): XmppClient {
-  if (!sharedClient) throw new Error("xmpp: client not started");
-  return sharedClient;
-}
-
-/** Запуск XMPP-клиента (вызывается из entry point при старте канала). */
-export async function startXmppRuntime(cfg: OpenClawConfig): Promise<void> {
-  const account = resolveAccount(cfg);
-  if (sharedClient) await sharedClient.stop();
-  sharedClient = new XmppClient({
-    jid: account.jid,
-    password: account.password,
-    host: account.host,
-    port: account.port,
-    tls: account.tls,
-    mucNick: account.mucNick,
-    homeChannel: account.homeChannel,
-  });
-  await sharedClient.start();
-}
-
-export async function stopXmppRuntime(): Promise<void> {
-  if (sharedClient) {
-    await sharedClient.stop();
-    sharedClient = null;
-  }
-}
