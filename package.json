@@ -1,0 +1,34 @@
+{
+  "name": "xmpp-adapter-openclaw",
+  "version": "0.1.0",
+  "description": "XMPP channel plugin for OpenClaw (port of Hermes xmpp-adapter)",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node test/smoke.js"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "channel": {
+      "id": "xmpp",
+      "label": "XMPP",
+      "selectionLabel": "XMPP (JID + Password)",
+      "detailLabel": "XMPP",
+      "docsPath": "/channels/xmpp",
+      "docsLabel": "xmpp",
+      "blurb": "XMPP/Jabber messaging with DM and MUC group chat support.",
+      "systemImage": "network"
+    }
+  },
+  "dependencies": {
+    "@xmpp/client": "^0.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "typescript": "^5.9.3"
+  }
+}
