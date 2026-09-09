@@ -107,7 +107,7 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
       });
 
       // Ingress: входящие → dispatch в agent runtime
-      client.on("message", (msg: any) => {
+      client.onMessage( (msg: any) => {
         void dispatchIncoming(msg, ctx, statusSink);
       });
 
@@ -115,7 +115,7 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
       sharedClient = client;
 
       // Ingress: подписка на события клиента
-      client.on("message", (msg: any) => {
+      client.onMessage( (msg: any) => {
         void dispatchIncoming(msg, ctx, statusSink);
       });
 
@@ -138,6 +138,7 @@ async function dispatchIncoming(
   ctx: any,
   statusSink: any,
 ): Promise<void> {
+  console.log("[xmpp:ingress] dispatchIncoming called for:", msg.from);
   try {
     statusSink?.({ lastInboundAt: Date.now() });
     const { dispatchInboundDirectDmWithRuntime } = await import(

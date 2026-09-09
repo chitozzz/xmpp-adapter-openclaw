@@ -131,6 +131,7 @@ export class XmppClient {
     await this.xmpp.start();
   }
 
+function onMessage(cb: (msg: any) => void) { this.handlers.message = cb; }
   async stop(): Promise<void> {
     this.stopPing();
     if (this.xmpp) {
