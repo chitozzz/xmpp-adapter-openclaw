@@ -73,6 +73,32 @@ IRC-плагин использует:
 
 ### 2.4 Ключевые host API (из IRC-плагина)
 
+**ВАЖНО (найдено при живой интеграции 2026-09-09):** канал стартует НЕ в
+`registerFull`/`setRuntime`, а через **`base.gateway.startAccount(ctx)`** —
+его вызывает сам gateway для каждого включённого аккаунта канала. IRC-плагин:
+
+```js
+gateway: { startAccount: async (ctx) => await startIrcGatewayAccount({...ctx}) }
+
+async function startIrcGatewayAccount(ctx) {
+  const statusSink = createAccountStatusSink({ accountId, setStatus: ctx.setStatus });
+  await runPassiveAccountLifecycle({
+    abortSignal: ctx.abortSignal,
+    start: () => monitorIrcProvider({ accountId, config: ctx.cfg, runtime: ctx.runtime, abortSignal, statusSink }),
+    stop: (monitor) => monitor.stop(),
+  });
+}
+```
+
+- `ctx`: `account`, `accountId`, `cfg`, `runtime`, `abortSignal`, `setStatus`,
+  `log`
+- `statusSink({ lastInboundAt/lastOutboundAt/lifecycle })` — heartbeat для
+  health-monitor (без него канал получает `restarting (reason: stopped)`)
+- `channelReadyPatch()` — статус «готов» после коннекта
+- Прямой вызов `dispatchInboundDirectDmWithRuntime` из «сырого» обработчика
+  сообщений работает, но правильнее положить ingress в account-runtime
+  (monitor), как делает IRC (`createChannelIngressMonitor`)
+
 - `openclaw/plugin-sdk/channel-entry-contract` — `defineBundledChannelEntry`
 - `openclaw/plugin-sdk/channel-ingress-runtime` — `channelIngressRoutes`,
   `createChannelIngressResolver`
