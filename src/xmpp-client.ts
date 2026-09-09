@@ -109,9 +109,6 @@ export class XmppClient {
 
     this.xmpp.on("stanza", (stanza: Stanza) => {
       if (stanza.is("message")) {
-        console.log(
-          String(stanza.getChild?.("body")?.text?.() ?? "").slice(0, 60),
-        );
         this.emitMessage(stanza);
         return;
       }
@@ -218,16 +215,9 @@ export class XmppClient {
     const type = String(stanza.attrs.type ?? "normal");
     if (type !== "chat" && type !== "groupchat") return;
 
-    // Текст — из body; пустого body нет → это chatstate/рейсипт, пропускаем.
-    let text = "";
-    let thread: string | undefined;
-    for (const child of stanza.children ?? []) {
-      if (child?.name === "body" && child.children?.[0]?.value) {
-        text = String(child.children[0].value);
-      } else if (child?.name === "thread" && child.children?.[0]?.value) {
-        thread = String(child.children[0].value);
-      }
-    }
+    // Текст — используем правильный API ltx Element
+    const text = stanza.getChildText("body") ?? "";
+    const thread = stanza.getChildText("thread") ?? undefined;
     if (!text) return;
 
     const chatType = type === "groupchat" ? "groupchat" : "chat";

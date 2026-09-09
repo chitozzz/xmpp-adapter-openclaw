@@ -130,7 +130,7 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
   });
 }
 
-/** Входящее сообщение → agent turn (через dispatchInboundDirectDmWithRuntime). */
+/** Входящее сообщение → agent turn (через dispatchInboundDirectDm). */
 async function dispatchIncoming(
   msg: any,
   ctx: any,
@@ -138,11 +138,11 @@ async function dispatchIncoming(
 ): Promise<void> {
   try {
     statusSink?.({ lastInboundAt: Date.now() });
-    const { dispatchInboundDirectDmWithRuntime } = await import(
+    const { dispatchInboundDirectDm } = await import(
       "openclaw/plugin-sdk/channel-inbound"
     );
     const isMuc = msg.chatType === "groupchat";
-    const account: ResolvedAccount = ctx.account;
+  const account: ResolvedAccount = ctx.account;
 
     // MUC: отвечаем только при упоминании ника бота
     let text = msg.text;
@@ -153,7 +153,7 @@ async function dispatchIncoming(
       text = text.replace(new RegExp(`@?${escapeRe(nick)}[:,]?\\s*`, "i"), "");
     }
 
-    await dispatchInboundDirectDmWithRuntime({
+    await dispatchInboundDirectDm({
       cfg: ctx.cfg,
       channel: CHANNEL_ID,
       channelLabel: "XMPP",
@@ -181,7 +181,6 @@ async function dispatchIncoming(
         ctx.log?.error?.("[xmpp] record error:", err),
       onDispatchError: (err: unknown, info: { kind?: string }) =>
         ctx.log?.error?.("[xmpp] dispatch error:", info?.kind, err),
-      runtime: ctx.runtime,
     } as any);
   } catch (err) {
     console.error("[xmpp] ingress failed:", err);
