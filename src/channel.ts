@@ -113,9 +113,9 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
 
       await client.start();
       sharedClient = client;
-
-      // Ingress: подписка на события клиента
-      client.onMessage( (msg: any) => {
+      console.log("[xmpp:lifecycle] Client started. Attaching handler to:", client);
+      client.onMessage((msg: any) => {
+        console.log("[xmpp:lifecycle] Inbound message caught by handler!");
         void dispatchIncoming(msg, ctx, statusSink);
       });
 
