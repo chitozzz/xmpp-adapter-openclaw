@@ -138,11 +138,46 @@ async function dispatchIncoming(
 ): Promise<void> {
   try {
     statusSink?.({ lastInboundAt: Date.now() });
+  const account: ResolvedAccount = ctx.account;
+    const isMuc = msg.chatType === "groupchat";
+
+    // Allowlist gate (DM security).
+    // Делаем проверку ДО dispatch, чтобы не светить LLM посторонним.
+    if (!isMuc) {
+      const policy = account.dmPolicy ?? "allowlist";
+      if (policy === "disabled") {
+        return; // DM выключены
+      }
+      const allowed = (account.allowFrom ?? []).map((s) =>
+        String(s).toLowerCase(),
+      );
+      const fromBare = msg.from.split("/")[0].toLowerCase();
+      if (policy === "allowlist" || policy === "pairing") {
+        if (!allowed.includes(fromBare)) {
+          if (policy === "pairing") {
+            const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+            try {
+              await getSharedClient().sendChat(
+                msg.from,
+                `Pairing code: ${code}\n` +
+                  `Send this code back to me to confirm your identity.`,
+              );
+              ctx.log?.info?.(`[xmpp] pairing code ${code} sent to ${msg.from}`);
+            } catch {}
+          } else {
+            ctx.log?.info?.(
+              `[xmpp] blocked DM from ${msg.from} (not in allowFrom)`,
+            );
+          }
+          return;
+        }
+      }
+      // policy === "open" — пускаем всех
+    }
+
     const { dispatchInboundDirectDm } = await import(
       "openclaw/plugin-sdk/channel-inbound"
     );
-    const isMuc = msg.chatType === "groupchat";
-  const account: ResolvedAccount = ctx.account;
 
     // MUC: отвечаем только при упоминании ника бота
     let text = msg.text;
