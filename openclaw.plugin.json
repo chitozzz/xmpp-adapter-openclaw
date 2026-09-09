@@ -1,16 +1,11 @@
 {
   "id": "xmpp",
   "name": "XMPP",
-  "description": "Custom XMPP channel plugin for OpenClaw",
-  "doctorContract": {
-    "configRepair": true
-  },
+  "description": "XMPP/Jabber channel plugin for OpenClaw",
+  "channels": ["xmpp"],
   "activation": {
     "onStartup": true
   },
-  "channels": [
-    "xmpp"
-  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -21,27 +16,52 @@
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "name": { "type": "string" },
           "enabled": { "type": "boolean" },
-          "host": { "type": "string" },
-          "port": { "type": "integer" },
-          "tls": { "type": "boolean" },
-          "jid": { "type": "string" },
+          "jid": {
+            "type": "string",
+            "description": "Bot JID (e.g. bot@example.com)"
+          },
           "password": { "type": "string" },
+          "host": {
+            "type": "string",
+            "description": "XMPP server host (optional, auto from JID)"
+          },
+          "port": {
+            "type": "integer",
+            "default": 5222
+          },
+          "tls": { "type": "boolean", "default": true },
+          "mucNick": {
+            "type": "string",
+            "description": "Nick in MUC rooms (default: localpart of JID)"
+          },
+          "homeChannel": {
+            "type": "string",
+            "description": "MUC room for cron/notifications (optional)"
+          },
           "allowFrom": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": { "type": "string" },
+            "description": "Allowed bare JIDs (empty = nobody, use pairing)"
+          },
+          "dmSecurity": {
+            "type": "string",
+            "enum": ["allowlist", "pairing", "open"]
           }
         },
-        "required": ["jid", "password"]
+        "required": ["jid"]
+      },
+      "uiHints": {
+        "jid": { "label": "JID", "help": "Bot JID, e.g. bot@example.com" },
+        "password": { "label": "Password", "help": "Account password", "sensitive": true },
+        "host": { "label": "Server", "help": "Optional; auto-discovered from JID" },
+        "port": { "label": "Port", "help": "Default 5222" },
+        "mucNick": { "label": "MUC nick", "help": "Nick in group chats" },
+        "allowFrom": { "label": "Allow from", "help": "Allowed bare JIDs" }
       }
     }
-  },
-  "label": "XMPP",
-  "description": "XMPP channel provider for instant communication.",
-  "uiHints": {
-    "jid": { "label": "JID", "help": "Full XMPP JID (e.g. bot@server.com)" },
-    "password": { "label": "Password", "help": "Account password" }
   }
 }

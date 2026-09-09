@@ -8,7 +8,7 @@
  * Запуск: node test/smoke.js
  */
 
-import { XmppClient } from "../src/xmpp-client.js";
+import { XmppClient } from "../dist/xmpp-client.js";
 
 const jid = process.env.XMPP_JID;
 const password = process.env.XMPP_PASSWORD;

@@ -27,8 +27,12 @@
   "dependencies": {
     "@xmpp/client": "^0.14.0"
   },
+  "peerDependencies": {
+    "openclaw": ">=2026.6.9"
+  },
   "devDependencies": {
     "@types/node": "^26.5.0",
+    "openclaw": "^2026.9.2",
     "typescript": "^5.9.3"
   }
 }
