@@ -5,9 +5,44 @@
  *   - connect + auth (SASL, STARTTLS, SRV-lookup)
  *   - presence, MUC (XEP-0045), typing (XEP-0085), ping keepalive (XEP-0199)
  *   - sendChat / sendGroupchat
+ *   - HTTP File Upload (XEP-0363) + OOB (XEP-0066) → sendMedia
  */
 
+import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
+import path from "node:path";
+import { URL } from "node:url";
 import { client, xml } from "@xmpp/client";
+
+const UPLOAD_NS = "urn:xmpp:http:upload:0";
+const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
+const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
+const OOB_NS = "jabber:x:oob";
+const CHATSTATES_NS = "http://jabber.org/protocol/chatstates";
+
+const MIME_BY_EXT: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".mov": "video/quicktime",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".wav": "audio/wav",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".zip": "application/zip",
+};
+
+export function guessMime(filePath: string): string {
+  return MIME_BY_EXT[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
+}
 
 export interface XmppConfig {
   jid: string;
@@ -18,6 +53,10 @@ export interface XmppConfig {
   mucNick?: string;
   homeChannel?: string;
   allowFrom?: string[];
+  /** Явный JID XEP-0363 сервиса (иначе — disco#items по домену). */
+  uploadService?: string;
+  /** Разрешить self-signed TLS при загрузке на share-хост (внутренний Snikket). */
+  allowInsecureTls?: boolean;
 }
 
 export interface XmppIncomingMessage {
@@ -37,11 +76,18 @@ export interface XmppIncomingMessage {
 type Stanza = any; // @xmpp/client xml element
 export type XmppEvent = "message" | "online" | "offline" | "error";
 
+export interface UploadSlot {
+  putUrl: string;
+  getUrl: string;
+  headers: Record<string, string>;
+}
+
 export class XmppClient {
   private xmpp: any;
   private cfg: XmppConfig;
   private online = false;
   private pingTimer: NodeJS.Timeout | null = null;
+  private uploadServiceCache: string | null = null;
   private static handlers: Record<string, any> = {};
   private pendingIq = new Map<string, (s: Stanza | null) => void>();
 
@@ -70,6 +116,10 @@ export class XmppClient {
 
   mucNick(): string {
     return this.cfg.mucNick || this.cfg.jid.split("@")[0];
+  }
+
+  private domain(): string {
+    return this.cfg.jid.split("@")[1] ?? "";
   }
 
   // ── Lifecycle ────────────────────────────────────────────────
@@ -256,7 +306,7 @@ export class XmppClient {
         { type: "chat", to },
         xml("body", {}, text),
         thread ? xml("thread", {}, thread) : "",
-        xml("active", { xmlns: "http://jabber.org/protocol/chatstates" }),
+        xml("active", { xmlns: CHATSTATES_NS }),
       ),
     );
   }
@@ -268,9 +318,206 @@ export class XmppClient {
         "message",
         { type: "groupchat", to },
         xml("body", {}, text),
-        xml("active", { xmlns: "http://jabber.org/protocol/chatstates" }),
+        xml("active", { xmlns: CHATSTATES_NS }),
       ),
     );
+  }
+
+  // ── XEP-0363: HTTP File Upload ───────────────────────────────
+
+  /**
+   * Найти upload-сервис. Порядок: явный cfg.uploadService → disco#items
+   * по домену (+ disco#info на фичу) → эвристика share./upload.<domain>.
+   */
+  async findUploadService(): Promise<string | null> {
+    if (this.cfg.uploadService) return this.cfg.uploadService;
+    if (this.uploadServiceCache) return this.uploadServiceCache;
+
+    const domain = this.domain();
+    if (!domain) return null;
+
+    const res = await this.sendIq(
+      xml("iq", { type: "get", to: domain, id: `disco-items-${Date.now()}` },
+        xml("query", { xmlns: DISCO_ITEMS_NS })),
+      10_000,
+    );
+
+    const candidates: string[] = [];
+    const query = res?.getChild?.("query", DISCO_ITEMS_NS);
+    for (const item of query?.getChildren?.("item") ?? []) {
+      const jid = item.attrs?.jid;
+      if (jid) candidates.push(String(jid));
+    }
+
+    for (const jid of candidates.slice(0, 8)) {
+      const info = await this.sendIq(
+        xml("iq", { type: "get", to: jid, id: `disco-info-${Date.now()}` },
+          xml("query", { xmlns: DISCO_INFO_NS })),
+        8_000,
+      );
+      const feats = info?.getChild?.("query", DISCO_INFO_NS)?.getChildren?.("feature") ?? [];
+      if (feats.some((f: any) => f.attrs?.var === UPLOAD_NS)) {
+        this.uploadServiceCache = jid;
+        return jid;
+      }
+    }
+
+    // Эвристика: типовые поддомены Prosody/Snikket.
+    for (const guess of [`share.${domain}`, `upload.${domain}`]) {
+      const info = await this.sendIq(
+        xml("iq", { type: "get", to: guess, id: `disco-info-${Date.now()}` },
+          xml("query", { xmlns: DISCO_INFO_NS })),
+        8_000,
+      );
+      const feats = info?.getChild?.("query", DISCO_INFO_NS)?.getChildren?.("feature") ?? [];
+      if (feats.some((f: any) => f.attrs?.var === UPLOAD_NS)) {
+        this.uploadServiceCache = guess;
+        return guess;
+      }
+    }
+    return null;
+  }
+
+  /** Запросить слот (XEP-0363 §4). */
+  async requestUploadSlot(
+    service: string,
+    filename: string,
+    size: number,
+    contentType: string,
+  ): Promise<UploadSlot> {
+    const res = await this.sendIq(
+      xml("iq", { type: "get", to: service, id: `slot-${Date.now()}` },
+        xml("request", {
+          xmlns: UPLOAD_NS,
+          filename,
+          size: String(size),
+          "content-type": contentType,
+        })),
+      20_000,
+    );
+
+    if (!res) throw new Error("upload slot: no response from " + service);
+    if (String(res.attrs?.type ?? "") === "error") {
+      const cond = res.getChild?.("error")?.getChildren?.()[0]?.name ?? "unknown";
+      throw new Error(`upload slot error: ${cond}`);
+    }
+
+    const slot = res.getChild?.("slot", UPLOAD_NS);
+    const put = slot?.getChild?.("put");
+    const get = slot?.getChild?.("get");
+    const putUrl = put?.attrs?.url;
+    const getUrl = get?.attrs?.url;
+    if (!putUrl || !getUrl) throw new Error("upload slot: malformed response");
+
+    const headers: Record<string, string> = {};
+    for (const h of put.getChildren?.("header") ?? []) {
+      if (h.attrs?.name) headers[String(h.attrs.name)] = h.getText?.() ?? "";
+    }
+    return { putUrl, getUrl, headers };
+  }
+
+  /** PUT байтов в слот. */
+  private putFile(
+    putUrl: string,
+    headers: Record<string, string>,
+    data: Buffer,
+    contentType: string,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let u: URL;
+      try {
+        u = new URL(putUrl);
+      } catch {
+        reject(new Error(`upload: bad slot URL ${putUrl}`));
+        return;
+      }
+      const mod = u.protocol === "https:" ? https : http;
+      const req = mod.request(
+        {
+          method: "PUT",
+          hostname: u.hostname,
+          port: u.port || (u.protocol === "https:" ? 443 : 80),
+          path: u.pathname + u.search,
+          headers: {
+            "Content-Type": contentType,
+            "Content-Length": String(data.length),
+            ...headers,
+          },
+          // Строгая проверка TLS по умолчанию; self-signed Snikket требует
+          // явного allowInsecureTls: true в конфиге канала.
+          rejectUnauthorized: this.cfg.allowInsecureTls !== true,
+        } as any,
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c as Buffer));
+          res.on("end", () => {
+            const code = res.statusCode ?? 0;
+            if (code >= 200 && code < 300) resolve();
+            else {
+              const body = Buffer.concat(chunks).toString("utf8").slice(0, 300);
+              reject(new Error(`upload PUT ${code}: ${body}`));
+            }
+          });
+        },
+      );
+      req.setTimeout(120_000, () => req.destroy(new Error("upload PUT timeout")));
+      req.on("error", reject);
+      req.end(data);
+    });
+  }
+
+  /** Загрузить локальный файл, вернуть публичный GET-URL. */
+  async uploadLocalFile(localPath: string): Promise<string> {
+    const clean = localPath.startsWith("file://")
+      ? new URL(localPath).pathname
+      : localPath;
+
+    let data: Buffer;
+    try {
+      data = await fs.promises.readFile(clean);
+    } catch (err: any) {
+      throw new Error(`upload: cannot read ${clean}: ${err?.message ?? err}`);
+    }
+
+    const service = await this.findUploadService();
+    if (!service) throw new Error("upload: no XEP-0363 service found");
+
+    const filename = path.basename(clean);
+    const contentType = guessMime(clean);
+    const slot = await this.requestUploadSlot(service, filename, data.length, contentType);
+    await this.putFile(slot.putUrl, slot.headers, data, contentType);
+    console.log(`[xmpp] uploaded ${filename} (${data.length} B) -> ${slot.getUrl}`);
+    return slot.getUrl;
+  }
+
+  /**
+   * Отправить вложение: локальный путь грузим через XEP-0363, готовый
+   * http(s)-URL шлём как есть. Ссылка идёт в OOB (XEP-0066).
+   */
+  async sendMedia(
+    to: string,
+    text: string,
+    mediaUrl: string,
+    opts?: { thread?: string; groupchat?: boolean },
+  ): Promise<string> {
+    const url = /^https?:\/\//i.test(mediaUrl)
+      ? mediaUrl
+      : await this.uploadLocalFile(mediaUrl);
+
+    const groupchat = opts?.groupchat ?? XmppClient.isMuc(to);
+    const body = text && text.trim() ? text : url;
+
+    await this.send(
+      xml(
+        "message",
+        { type: groupchat ? "groupchat" : "chat", to },
+        xml("body", {}, body),
+        xml("x", { xmlns: OOB_NS }, xml("url", {}, url)),
+        !groupchat && opts?.thread ? xml("thread", {}, opts.thread) : "",
+        xml("active", { xmlns: CHATSTATES_NS }),
+      ),
+    );
+    return url;
   }
 
   /** Зайти в MUC-комнату (XEP-0045, presence с muc x). */
@@ -301,7 +548,7 @@ export class XmppClient {
       xml(
         "message",
         { type: "chat", to },
-        xml(state, { xmlns: "http://jabber.org/protocol/chatstates" }),
+        xml(state, { xmlns: CHATSTATES_NS }),
       ),
     );
   }

@@ -50,6 +50,15 @@
           "dmSecurity": {
             "type": "string",
             "enum": ["allowlist", "pairing", "open"]
+          },
+          "uploadService": {
+            "type": "string",
+            "description": "XEP-0363 upload service JID (e.g. share.example.com). Optional: auto-discovered via disco#items/info"
+          },
+          "allowInsecureTls": {
+            "type": "boolean",
+            "default": false,
+            "description": "Accept self-signed TLS certs when uploading to the share host (internal Snikket/Prosody only)"
           }
         },
         "required": ["jid"]
@@ -60,7 +69,9 @@
         "host": { "label": "Server", "help": "Optional; auto-discovered from JID" },
         "port": { "label": "Port", "help": "Default 5222" },
         "mucNick": { "label": "MUC nick", "help": "Nick in group chats" },
-        "allowFrom": { "label": "Allow from", "help": "Allowed bare JIDs" }
+        "allowFrom": { "label": "Allow from", "help": "Allowed bare JIDs" },
+        "uploadService": { "label": "Upload service", "help": "XEP-0363 file upload service JID (optional)" },
+        "allowInsecureTls": { "label": "Allow insecure TLS", "help": "Accept self-signed certs on the upload host" }
       }
     }
   }

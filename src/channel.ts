@@ -33,6 +33,8 @@ export type ResolvedAccount = {
   homeChannel?: string;
   allowFrom: string[];
   dmPolicy: string | undefined;
+  uploadService?: string;
+  allowInsecureTls?: boolean;
 };
 
 export function resolveAccount(
@@ -59,6 +61,8 @@ export function resolveAccount(
     homeChannel: section?.homeChannel,
     allowFrom: section?.allowFrom ?? [],
     dmPolicy: section?.dmSecurity,
+    uploadService: section?.uploadService,
+    allowInsecureTls: section?.allowInsecureTls,
   };
 }
 
@@ -104,6 +108,8 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
         tls: account.tls,
         mucNick: account.mucNick,
         homeChannel: account.homeChannel,
+        uploadService: account.uploadService,
+        allowInsecureTls: account.allowInsecureTls,
       });
 
       // Ingress: входящие → dispatch в agent runtime
@@ -234,7 +240,7 @@ export const xmppPlugin = createChatChannelPlugin<ResolvedAccount>({
 
     capabilities: {
       chatTypes: ["direct", "group"],
-      media: false,
+      media: true,
     },
 
     config: {
@@ -311,6 +317,22 @@ export const xmppPlugin = createChatChannelPlugin<ResolvedAccount>({
         return {
           messageId: randomUUID(),
           target: { kind: "conversation", id: to },
+        };
+      },
+      sendMedia: async (ctx: any) => {
+        const client = getSharedClient();
+        const to = ctx.to;
+        const text = stripMarkdown(String(ctx.text ?? ""));
+        const mediaUrl = String(ctx.mediaUrl ?? "");
+        if (!mediaUrl) throw new Error("xmpp sendMedia: mediaUrl is required");
+        const url = await client.sendMedia(to, text, mediaUrl, {
+          thread: ctx.threadId != null ? String(ctx.threadId) : undefined,
+          groupchat: XmppClient.isMuc(to),
+        });
+        return {
+          messageId: randomUUID(),
+          target: { kind: "conversation", id: to },
+          url,
         };
       },
     },
