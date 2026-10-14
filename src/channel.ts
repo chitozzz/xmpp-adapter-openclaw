@@ -16,6 +16,13 @@ import {
   runPassiveAccountLifecycle,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
+import {
+  createChannelIngressResolver,
+  defineStableChannelIngressIdentity,
+  channelIngressRoutes,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
+import { isControlCommandMessage } from "openclaw/plugin-sdk/command-auth";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { XmppClient } from "./xmpp-client.js";
 import { stripMarkdown } from "./markdown.js";
 import { randomUUID } from "node:crypto";
@@ -136,97 +143,165 @@ async function startXmppGatewayAccount(ctx: any): Promise<void> {
   });
 }
 
-/** Входящее сообщение → agent turn (через dispatchInboundDirectDm). */
-async function dispatchIncoming(
-  msg: any,
-  ctx: any,
-  statusSink: any,
-): Promise<void> {
-  try {
-    statusSink?.({ lastInboundAt: Date.now() });
-  const account: ResolvedAccount = ctx.account;
-    const isMuc = msg.chatType === "groupchat";
+const xmppIngressIdentity = defineStableChannelIngressIdentity({
+  key: "jid",
+  normalize: (v) => normalizeLowercaseStringOrEmpty(String(v).split("/")[0]),
+  isWildcardEntry: () => false,
+});
 
-    // Allowlist gate (DM security).
-    // Делаем проверку ДО dispatch, чтобы не светить LLM посторонним.
-    if (!isMuc) {
-      const policy = account.dmPolicy ?? "allowlist";
-      if (policy === "disabled") {
-        return; // DM выключены
-      }
-      const allowed = (account.allowFrom ?? []).map((s) =>
-        String(s).toLowerCase(),
-      );
-      const fromBare = msg.from.split("/")[0].toLowerCase();
-      if (policy === "allowlist" || policy === "pairing") {
-        if (!allowed.includes(fromBare)) {
-          if (policy === "pairing") {
-            const code = Math.random().toString(36).slice(2, 8).toUpperCase();
-            try {
-              await getSharedClient().sendChat(
-                msg.from,
-                `Pairing code: ${code}\n` +
-                  `Send this code back to me to confirm your identity.`,
-              );
-              ctx.log?.info?.(`[xmpp] pairing code ${code} sent to ${msg.from}`);
-            } catch {}
-          } else {
-            ctx.log?.info?.(
-              `[xmpp] blocked DM from ${msg.from} (not in allowFrom)`,
-            );
-          }
+/** Входящее сообщение → agent turn (через dispatchInboundDirectDm). */
+  async function dispatchIncoming(
+    msg: any,
+    ctx: any,
+    statusSink: any,
+  ): Promise<void> {
+    try {
+      statusSink?.({ lastInboundAt: Date.now() });
+      const account: ResolvedAccount = ctx.account;
+      const isMuc = msg.chatType === "groupchat";
+
+      const fromBare = String(msg.from).split("/")[0];
+      const senderBare = fromBare.toLowerCase();
+
+      // Пароль доверия: Pairing (DM). Если DM в allowlist/pairing, но не в списке — выдать код.
+      if (!isMuc) {
+        const policy = account.dmPolicy ?? "allowlist";
+        if (policy === "disabled") {
           return;
         }
-      }
-      // policy === "open" — пускаем всех
-    }
-
-    const { dispatchInboundDirectDm } = await import(
-      "openclaw/plugin-sdk/channel-inbound"
-    );
-
-    // MUC: отвечаем только при упоминании ника бота
-    let text = msg.text;
-    if (isMuc) {
-      const nick = account.mucNick ?? account.jid.split("@")[0];
-      const mentioned = new RegExp(`@?${escapeRe(nick)}\\b`, "i").test(text);
-      if (!mentioned) return;
-      text = text.replace(new RegExp(`@?${escapeRe(nick)}[:,]?\\s*`, "i"), "");
-    }
-
-    await dispatchInboundDirectDm({
-      cfg: ctx.cfg,
-      channel: CHANNEL_ID,
-      channelLabel: "XMPP",
-      accountId: ctx.accountId ?? "default",
-      peer: { id: msg.from },
-      senderId: msg.from,
-      senderAddress: msg.from,
-      recipientAddress: account.jid,
-      conversationLabel: isMuc ? `${msg.from} (MUC)` : msg.from,
-      rawBody: text,
-      messageId: msg.stanzaId ?? `${Date.now()}-${randomUUID().slice(0, 8)}`,
-      provider: "xmpp",
-      deliver: async (payload: any) => {
-        const out = String(payload?.text ?? "");
-        if (!out) return;
-        const client = getSharedClient();
-        if (isMuc) {
-          await client.sendGroupchat(msg.from, stripMarkdown(out));
-        } else {
-          await client.sendChat(msg.from, stripMarkdown(out), msg.thread);
+        const allowed = (account.allowFrom ?? []).map((s) => String(s).toLowerCase());
+        if (policy === "allowlist" || policy === "pairing") {
+          if (!allowed.includes(senderBare)) {
+            if (policy === "pairing") {
+              const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+              try {
+                await getSharedClient().sendChat(
+                  msg.from,
+                  `Pairing code: ${code}\n` + `Send this code back to me to confirm your identity.`,
+                );
+                ctx.log?.info?.(`[xmpp] pairing code ${code} sent to ${msg.from}`);
+              } catch (err) {
+                ctx.log?.warn?.(`[xmpp] pairing send failed:`, err);
+              }
+            } else {
+              ctx.log?.info?.(
+                `[xmpp] blocked DM from ${msg.from} (not in allowFrom)`,
+              );
+            }
+            return;
+          }
         }
-        statusSink?.({ lastOutboundAt: Date.now() });
-      },
-      onRecordError: (err: unknown) =>
-        ctx.log?.error?.("[xmpp] record error:", err),
-      onDispatchError: (err: unknown, info: { kind?: string }) =>
-        ctx.log?.error?.("[xmpp] dispatch error:", info?.kind, err),
-    } as any);
-  } catch (err) {
-    console.error("[xmpp] ingress failed:", err);
+      }
+
+      const { dispatchInboundDirectDm } = await import(
+        "openclaw/plugin-sdk/channel-inbound"
+      );
+
+      // MUC: отвечаем только при упоминании ника бота
+      let text = msg.text;
+      const rawTextForCommand = msg.text;
+      if (isMuc) {
+        const nick = account.mucNick ?? account.jid.split("@")[0];
+        const mentioned = new RegExp(`@?${escapeRe(nick)}\\b`, "i").test(text);
+        if (!mentioned) return;
+        text = text.replace(new RegExp(`@?${escapeRe(nick)}[:,]?\\s*`, "i"), "");
+      }
+
+      const config = ctx.cfg as OpenClawConfig;
+      const channelId = CHANNEL_ID;
+      const accountId = String(ctx.accountId ?? "default");
+
+      const allowFrom = (account.allowFrom ?? []).map((s) => String(s));
+      const groupAllowFrom = [] as string[];
+
+      const resolver = createChannelIngressResolver({
+        channelId,
+        accountId,
+        identity: xmppIngressIdentity,
+        cfg: config,
+        defaultDmPolicy: (account.dmPolicy ?? "allowlist") as any,
+        useDefaultPairingStore: true,
+      });
+
+      const hasControlCommand = isControlCommandMessage(text, config);
+      const allowTextCommands = true;
+
+      const routeGroupAllowFrom = [] as string[];
+      const routeDescriptors = isMuc
+        ? channelIngressRoutes({
+            id: "xmpp:room",
+            configured: true,
+            matched: true,
+            allowed: true,
+            precedence: 0,
+            matchId: "xmpp-room",
+          })
+        : [];
+
+      const ingress = await resolver.message({
+        subject: { stableId: senderBare },
+        conversation: {
+          kind: isMuc ? "group" : "direct",
+          id: isMuc ? fromBare : senderBare,
+        },
+        event: { kind: "message", authMode: "inbound", mayPair: !isMuc },
+        dmPolicy: (account.dmPolicy ?? "allowlist") as any,
+        groupPolicy: "allowlist" as any,
+        policy: {
+          groupAllowFromFallbackToAllowFrom: false,
+          activation: {
+            requireMention: isMuc,
+            allowTextCommands,
+          },
+        },
+        allowFrom,
+        groupAllowFrom,
+        route: routeDescriptors,
+        mentionFacts: isMuc
+          ? {
+              canDetectMention: true,
+              wasMentioned: true,
+              hasAnyMention: true,
+            }
+          : undefined,
+        command: { allowTextCommands, hasControlCommand },
+      });
+
+      await dispatchInboundDirectDm({
+        cfg: config,
+        channel: channelId,
+        channelLabel: "XMPP",
+        accountId,
+        peer: { kind: "direct", id: msg.from },
+        senderId: msg.from,
+        senderAddress: msg.from,
+        recipientAddress: account.jid,
+        conversationLabel: isMuc ? `${fromBare} (MUC)` : msg.from,
+        rawBody: text,
+        messageId: msg.stanzaId ?? `${Date.now()}-${randomUUID().slice(0, 8)}`,
+        provider: "xmpp",
+        commandAuthorized: ingress.commandAccess?.authorized,
+        channelIngress: ingress as any,
+        deliver: async (payload: any) => {
+          const out = String(payload?.text ?? "");
+          if (!out) return;
+          const client = getSharedClient();
+          if (isMuc) {
+            await client.sendGroupchat(msg.from, stripMarkdown(out));
+          } else {
+            await client.sendChat(msg.from, stripMarkdown(out), msg.thread);
+          }
+          statusSink?.({ lastOutboundAt: Date.now() });
+        },
+        onRecordError: (err: unknown) =>
+          ctx.log?.error?.("[xmpp] record error:", err),
+        onDispatchError: (err: unknown, info: { kind?: string }) =>
+          ctx.log?.error?.("[xmpp] dispatch error:", info?.kind, err),
+      } as any);
+    } catch (err) {
+      console.error("[xmpp] ingress failed:", err);
+    }
   }
-}
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
